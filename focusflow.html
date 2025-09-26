@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>FocusFlow — PWA Task Manager</title>
+  <meta name="theme-color" content="#f7f7f7" />
+  <style>
+    /* macOS-inspired, light, frosted window UI */
+    :root{
+      --bg:#f3f4f6; --window:#ffffff; --muted:#6b7280; --accent:#007aff;
+      --radius:14px; --gap:12px; --shadow:0 10px 30px rgba(15,23,42,0.08);
+      --traffic-red:#ff5f56; --traffic-yellow:#ffbd2e; --traffic-green:#27c93f;
+      color-scheme: light;
+    }
+    *{box-sizing:border-box}
+    html,body,#root{height:100%}
+    body{margin:0;font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;background:linear-gradient(180deg,var(--bg),#ffffff);color:#0f172a;-webkit-font-smoothing:antialiased}
+
+    /* Centered app window */
+    .stage{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px}
+    .window{width:880px;max-width:95vw;border-radius:var(--radius);background:linear-gradient(180deg, rgba(255,255,255,0.95), rgba(250,250,250,0.98));box-shadow:var(--shadow);overflow:hidden;backdrop-filter:blur(6px);}
+
+    /* Toolbar / traffic lights */
+    .toolbar{height:56px;display:flex;align-items:center;gap:12px;padding:0 14px;border-bottom:1px solid rgba(15,23,42,0.04)}
+    .traffic{display:flex;gap:8px;align-items:center}
+    .dot{width:12px;height:12px;border-radius:50%}
+    .title{flex:1;text-align:center;font-weight:600;color:#111827}
+
+    /* Content */
+    .content{display:grid;grid-template-columns:1fr 320px;gap:20px;padding:20px}
+    .pane{background:transparent}
+    .card{background:var(--window);border-radius:10px;padding:14px;border:1px solid rgba(15,23,42,0.04)}
+
+    /* Today list */
+    .today-header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .input-row{display:flex;gap:8px;margin-top:12px}
+    input[type=text],textarea,select{border:1px solid rgba(15,23,42,0.06);padding:10px;border-radius:8px;color:inherit;width:100%;background:transparent}
+    button{background:var(--accent);border:none;padding:8px 12px;border-radius:8px;color:white;font-weight:600;cursor:pointer}
+
+    .task{display:flex;gap:12px;align-items:center;padding:10px;border-radius:8px;border:1px solid rgba(15,23,42,0.03);margin-bottom:8px;transition:transform .12s ease,box-shadow .12s ease}
+    .task:hover{transform:translateY(-4px);box-shadow:0 6px 18px rgba(15,23,42,0.06)}
+    .checkbox{width:18px;height:18px;border-radius:4px;border:2px solid rgba(15,23,42,0.08);display:flex;align-items:center;justify-content:center;cursor:pointer}
+    .title{font-weight:600}
+    .muted{color:var(--muted);font-size:13px}
+    .priority{font-size:12px;padding:4px 8px;border-radius:999px}
+    .urgent{background:#fde8e8;color:#7f1d1d}
+    .high{background:#fff4e6;color:#92400e}
+
+    /* Right column */
+    .right-col{display:flex;flex-direction:column;gap:12px}
+    .small{font-size:13px}
+    .progress-bar{height:8px;background:linear-gradient(90deg,#e6eef8,#f3f4f6);border-radius:999px;overflow:hidden}
+    .progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),#00a0ff)}
+
+    /* Modal */
+    .modal-backdrop{position:fixed;inset:0;background:rgba(2,6,23,0.35);display:flex;align-items:center;justify-content:center}
+    .modal{width:420px;background:var(--window);border-radius:12px;padding:18px;border:1px solid rgba(15,23,42,0.06)}
+    .modal h3{margin:0 0 8px 0}
+    .row{display:flex;gap:8px;align-items:center}
+
+    /* Footer */
+    .footer{padding:12px 20px;border-top:1px solid rgba(15,23,42,0.04);display:flex;justify-content:space-between;align-items:center;color:var(--muted)}
+
+    @media (max-width:940px){ .content{grid-template-columns:1fr} .right-col{order:2} }
+  </style>
+  <script src="https://unpkg.com/react@17/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+  <script src="https://unpkg.com/localforage/dist/localforage.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+  const {useState,useEffect,useRef} = React;
+  const DB = { todayKey: 'focusflow_today_v1', savedKey: 'focusflow_saved_v1', settingsKey: 'focusflow_settings_v1', lastResetKey: 'focusflow_lastreset_v1' };
+  localforage.config({name:'FocusFlow'});
+  function uid(prefix='id'){return prefix+'_'+Math.random().toString(36).slice(2,9)}
+  function nowDateISO(){ return new Date().toISOString().slice(0,10) }
+
+  async function loadAll(){
+    const today = (await localforage.getItem(DB.todayKey)) || {date: nowDateISO(), tasks: []};
+    const saved = (await localforage.getItem(DB.savedKey)) || [];
+    const settings = (await localforage.getItem(DB.settingsKey)) || {reminderHour:9};
+    const lastReset = await localforage.getItem(DB.lastResetKey) || null;
+    return {today,saved,settings,lastReset};
+  }
+
+  function App(){
+    const mountedRef = useRef(false);
+    const reminderTimerRef = useRef(null);
+    const quickTextRef = useRef(null);
+    const quickPrioRef = useRef(null);
+
+    const [ready,setReady] = useState(false);
+    const [today,setToday] = useState({date:nowDateISO(),tasks:[]});
+    const [saved,setSaved] = useState([]);
+    const [settings,setSettings] = useState({reminderHour:9});
+    const [showModal,setShowModal] = useState(false);
+    const [modalItems,setModalItems] = useState([]);
+
+    // keep mounted flag
+    useEffect(()=>{ mountedRef.current = true; return ()=>{ mountedRef.current = false; }; },[]);
+
+    // initial load
+    useEffect(()=>{
+      let beforeInstallHandler = (e)=>{ e.preventDefault(); /* store prompt if needed */ };
+
+      (async()=>{
+        try{
+          const data = await loadAll();
+          if(!mountedRef.current) return;
+          // set loaded data
+          setToday(data.today || {date: nowDateISO(), tasks: []});
+          setSaved(data.saved || []);
+          setSettings(data.settings || {reminderHour:9});
+
+          // rollover logic: if stored day is older than today, prompt or reset
+          const todayISO = nowDateISO();
+          if(data.today && data.today.date && data.today.date !== todayISO){
+            const incompleteHigh = (data.today.tasks || []).filter(t=> !t.done && (t.priority==='urgent' || t.priority==='high'));
+            if(incompleteHigh.length > 0){
+              // prepare modal with items to add
+              setModalItems(incompleteHigh.map(t=> ({...t, id: uid('t')})));
+              setShowModal(true);
+            } else {
+              // reset silently
+              const newToday = {date: todayISO, tasks: []};
+              setToday(newToday);
+              await localforage.setItem(DB.todayKey, newToday);
+              await localforage.setItem(DB.lastResetKey, new Date().toISOString());
+            }
+          }
+        }catch(err){ console.warn('loadAll error', err); }
+        if(!mountedRef.current) return;
+        setReady(true);
+      })();
+
+      window.addEventListener('beforeinstallprompt', beforeInstallHandler);
+      return ()=>{ window.removeEventListener('beforeinstallprompt', beforeInstallHandler); };
+    },[]);
+
+    // Helper state-updaters that persist immediately
+    function addTodayTask(text, priority='normal'){
+      if(!text) return;
+      const t = { id: uid('t'), text, priority, done:false, created: Date.now() };
+      setToday(prev => {
+        const next = { ...prev, tasks: [t, ...(prev.tasks || [])] };
+        localforage.setItem(DB.todayKey, next).catch(()=>{});
+        return next;
+      });
+    }
+
+    function toggleDone(id){
+      setToday(prev => {
+        const next = { ...prev, tasks: (prev.tasks||[]).map(t=> t.id===id ? {...t, done: !t.done} : t) };
+        localforage.setItem(DB.todayKey, next).catch(()=>{});
+        return next;
+      });
+    }
+
+    function setPriority(id, p){
+      setToday(prev => {
+        const next = { ...prev, tasks: (prev.tasks||[]).map(t=> t.id===id ? {...t, priority: p} : t) };
+        localforage.setItem(DB.todayKey, next).catch(()=>{});
+        return next;
+      });
+    }
+
+    function clearCompleted(){
+      setToday(prev => {
+        const next = { ...prev, tasks: (prev.tasks||[]).filter(t=> !t.done) };
+        localforage.setItem(DB.todayKey, next).catch(()=>{});
+        return next;
+      });
+    }
+
+    function editTask(id, newText){
+      setToday(prev => {
+        const next = { ...prev, tasks: (prev.tasks||[]).map(t=> t.id===id? {...t, text:newText}:t) };
+        localforage.setItem(DB.todayKey, next).catch(()=>{});
+        return next;
+      });
+    }
+
+    function removeTask(id){
+      setToday(prev => {
+        const next = { ...prev, tasks: (prev.tasks||[]).filter(t=> t.id!==id) };
+        localforage.setItem(DB.todayKey, next).catch(()=>{});
+        return next;
+      });
+    }
+
+    // Saved lists
+    function createSaved(name, items=[]){
+      const s = { id: uid('s'), name, items: items.map(it=> ({ id: uid('si'), text: it, done:false, priority: 'normal' })), created: Date.now() };
+      setSaved(prev => { const next = [s, ...prev]; localforage.setItem(DB.savedKey, next).catch(()=>{}); return next; });
+    }
+    function updateSaved(id, newS){ setSaved(prev => { const next = prev.map(s=> s.id===id? {...s,...newS}:s); localforage.setItem(DB.savedKey, next).catch(()=>{}); return next; }); }
+    function deleteSaved(id){ setSaved(prev => { const next = prev.filter(s=> s.id!==id); localforage.setItem(DB.savedKey, next).catch(()=>{}); return next; }); }
+    function pushSavedToToday(listId){
+      const list = saved.find(s=> s.id===listId);
+      if(!list) return;
+      const toCopy = (list.items||[]).filter(i=> !i.done).map(i=> ({ id: uid('t'), text: i.text, priority: i.priority || 'normal', done:false, created: Date.now() }));
+      setToday(prev => { const next = { ...prev, tasks: [...toCopy, ...(prev.tasks||[])] }; localforage.setItem(DB.todayKey, next).catch(()=>{}); return next; });
+    }
+
+    // Export helpers
+    function exportJSON(){ const payload = { today, saved, settings, exportedAt: new Date().toISOString() }; const blob = new Blob([JSON.stringify(payload,null,2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'focusflow-export-' + nowDateISO() + '.json'; a.click(); URL.revokeObjectURL(url); }
+
+    function exportCSV(){
+      const rows = [['id','text','priority','done','created']];
+      (today.tasks || []).forEach(t => rows.push([t.id, `"${(t.text||'').replace(/"/g,'""') }"`, t.priority || '', t.done ? '1' : '0', t.created || '']));
+      const csv = rows.map(r => r.join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'focusflow-today-' + nowDateISO() + '.csv'; a.click(); URL.revokeObjectURL(url);
+    }
+
+    // Reminder scheduling (simple, works while app open)
+    useEffect(()=>{
+      function schedule(){
+        try{
+          if(!('Notification' in window)) return;
+          if(Notification.permission !== 'granted') return;
+          const now = new Date(); const nowH = now.getHours(); const target = (settings && settings.reminderHour) ? settings.reminderHour : 9;
+          let diff = (target - nowH) * 3600 * 1000;
+          if(diff <= 0) diff += 24 * 3600 * 1000;
+          if(reminderTimerRef.current) clearTimeout(reminderTimerRef.current);
+          reminderTimerRef.current = setTimeout(()=>{
+            try{ new Notification('FocusFlow', { body: 'Time to plan your day!' }); }catch(e){console.warn('notify err', e);} schedule();
+          }, diff);
+        }catch(e){ console.warn('schedule err', e); }
+      }
+      schedule();
+      return ()=>{ if(reminderTimerRef.current){ clearTimeout(reminderTimerRef.current); reminderTimerRef.current = null; } };
+    }, [settings && settings.reminderHour]);
+
+    // Modal handlers (rollover)
+    function modalAddAll(){ if(!modalItems || modalItems.length === 0){ setShowModal(false); return; } setToday(prev => { const items = modalItems.map(i => ({ ...i, id: uid('t'), created: Date.now(), done:false })); const next = { ...prev, tasks: [...items, ...(prev.tasks||[])] }; localforage.setItem(DB.todayKey, next).catch(()=>{}); return next; }); setShowModal(false); }
+    function modalSkip(){ const newToday = { date: nowDateISO(), tasks: [] }; setToday(newToday); localforage.setItem(DB.todayKey, newToday).catch(()=>{}); setShowModal(false); }
+
+    // simple derived metrics
+    const doneCount = (today.tasks || []).filter(t => t.done).length;
+    const total = (today.tasks || []).length;
+    const pct = total === 0 ? 0 : Math.round((doneCount/total) * 100);
+
+    return (
+      <div className="stage">
+        <div className="window" role="application">
+          <div className="toolbar">
+            <div className="traffic">
+              <div className="dot" style={{background: 'var(--traffic-red)'}}></div>
+              <div className="dot" style={{background: 'var(--traffic-yellow)'}}></div>
+              <div className="dot" style={{background: 'var(--traffic-green)'}}></div>
+            </div>
+            <div className="title">FocusFlow</div>
+            <div style={{width:160,display:'flex',gap:8,justifyContent:'flex-end'}}>
+              <button onClick={exportJSON} style={{background:'#eef2ff',color:'#073e9a',border:'none',padding:'6px 10px',borderRadius:8}}>Export</button>
+            </div>
+          </div>
+
+          <div className="content">
+            <div className="pane">
+              <div className="card">
+                <div className="today-header">
+                  <div>
+                    <h2 style={{margin:0}}>Today's Focus</h2>
+                    <div className="muted small">{doneCount} of {total} tasks complete • {pct}%</div>
+                  </div>
+                  <div>
+                    <button onClick={()=>{ if(window.confirm('Clear all tasks for today?')){ const newToday = { date: nowDateISO(), tasks: [] }; setToday(newToday); localforage.setItem(DB.todayKey, newToday).catch(()=>{}); } }}>Clear</button>
+                  </div>
+                </div>
+
+                <div className="input-row">
+                  <input ref={quickTextRef} type="text" placeholder="Add a task for Today" onKeyDown={(e)=>{ if(e.key === 'Enter'){ const val = (quickTextRef.current && quickTextRef.current.value) ? quickTextRef.current.value.trim() : ''; const pr = (quickPrioRef.current && quickPrioRef.current.value) ? quickPrioRef.current.value : 'normal'; if(val){ addTodayTask(val, pr); quickTextRef.current.value = ''; } } }} />
+                  <select ref={quickPrioRef} defaultValue="normal">
+                    <option value="normal">Normal</option>
+                    <option value="high">High</option>
+                    <option value="urgent">Urgent</option>
+                  </select>
+                  <button onClick={()=>{ const val = (quickTextRef.current && quickTextRef.current.value) ? quickTextRef.current.value.trim() : ''; const pr = (quickPrioRef.current && quickPrioRef.current.value) ? quickPrioRef.current.value : 'normal'; if(val){ addTodayTask(val, pr); quickTextRef.current.value = ''; } }}>Add</button>
+                </div>
+
+                <div style={{marginTop:12}}>
+                  {(today.tasks || []).filter(t=> !t.done).map(t => (
+                    <div className="task" key={t.id}>
+                      <div className="checkbox" onClick={()=>toggleDone(t.id)}>{t.done ? '✓' : ''}</div>
+                      <div style={{flex:1}}>
+                        <div className="title">{t.text} {t.priority==='urgent' && <span className="priority urgent">URGENT</span>}{t.priority==='high' && <span className="priority high">HIGH</span>}</div>
+                        <div className="muted small">Added: {t.created ? new Date(t.created).toLocaleString() : ''}</div>
+                      </div>
+                      <div style={{display:'flex',gap:8}}>
+                        <button onClick={()=>{ const nm = window.prompt('Edit task', t.text); if(nm !== null) editTask(t.id, nm); }}>Edit</button>
+                        <button onClick={()=>removeTask(t.id)}>Delete</button>
+                      </div>
+                    </div>
+                  ))}
+
+                  <div style={{marginTop:10}}>
+                    <details style={{padding:8,borderRadius:8,border:'1px solid rgba(15,23,42,0.03)'}}>
+                      <summary className="muted">Completed ({(today.tasks || []).filter(t=>t.done).length})</summary>
+                      {(today.tasks || []).filter(t=>t.done).map(t => (
+                        <div key={t.id} className="task" style={{opacity:0.7}}>
+                          <div className="checkbox" onClick={()=>toggleDone(t.id)}>✓</div>
+                          <div style={{flex:1}}><div className="title">{t.text}</div><div className="muted small">Completed</div></div>
+                          <div style={{display:'flex',gap:8}}><button onClick={()=>removeTask(t.id)}>Remove</button></div>
+                        </div>
+                      ))}
+                      <div style={{marginTop:8}}><button onClick={clearCompleted}>Clear Completed</button></div>
+                    </details>
+                  </div>
+                </div>
+
+              </div>
+
+              <div style={{height:12}}></div>
+
+              <div className="card">
+                <h3 style={{marginTop:0}}>Saved Lists</h3>
+                <SavedListsPanel saved={saved} createSaved={createSaved} updateSaved={updateSaved} deleteSaved={deleteSaved} pushSavedToToday={pushSavedToToday} />
+              </div>
+
+            </div>
+
+            <div className="right-col">
+              <div className="card">
+                <h4 style={{margin:0}}>Progress</h4>
+                <div style={{marginTop:10}} className="progress-bar"><div className="progress-fill" style={{width:`${pct}%`}}></div></div>
+                <div style={{marginTop:10}} className="muted small">{doneCount} done • {total} total</div>
+              </div>
+
+              <div className="card">
+                <h4 style={{margin:0}}>Quick Actions</h4>
+                <div style={{display:'flex',flexDirection:'column',gap:8,marginTop:10}}>
+                  <button onClick={exportJSON}>Export JSON</button>
+                  <button onClick={()=>{ const a = document.createElement('a'); a.href = 'data:text/plain,FocusFlow'; a.download = 'readme.txt'; a.click(); }}>Download Readme</button>
+                  <button onClick={exportCSV}>Export CSV</button>
+                </div>
+              </div>
+
+              <div className="card">
+                <h4 style={{margin:0}}>Settings</h4>
+                <div style={{marginTop:8}}>
+                  <label className="muted small">Daily reminder hour</label>
+                  <input type="number" value={settings.reminderHour} min={0} max={23} onChange={(e)=>{ const v = Number(e.target.value); setSettings(prev=>{ const next = {...prev, reminderHour: v}; localforage.setItem(DB.settingsKey, next).catch(()=>{}); return next; }); }} />
+                </div>
+                <div style={{marginTop:8}} className="muted small">Data stored locally. Installable PWA.</div>
+              </div>
+            </div>
+
+          </div>
+
+          <div className="footer"> <div>FocusFlow — Simple macOS-style PWA</div> <div>{today.date}</div> </div>
+        </div>
+
+        {showModal && (
+          <div className="modal-backdrop">
+            <div className="modal">
+              <h3>Unfinished high-priority tasks from yesterday</h3>
+              <div className="muted small">Choose what to do with them:</div>
+              <div style={{marginTop:12,display:'flex',flexDirection:'column',gap:8}}>
+                {modalItems.map(it=> (<div key={it.id} style={{padding:8,borderRadius:8,border:'1px solid rgba(15,23,42,0.03)'}}>{it.text} <div className="muted small">{it.priority}</div></div>))}
+              </div>
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:12}}>
+                <button onClick={modalSkip} style={{background:'#e5e7eb',color:'#111'}}>Skip</button>
+                <button onClick={modalAddAll}>Add to Today</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function SavedListsPanel({saved,createSaved,updateSaved,deleteSaved,pushSavedToToday}){
+    const [name,setName] = useState('');
+    const [itemsText,setItemsText] = useState('');
+
+    function submit(){
+      const items = (itemsText || '').split('\n').map(s => s.trim()).filter(Boolean);
+      if(!name) return window.alert('Name required');
+      createSaved(name, items);
+      setName(''); setItemsText('');
+    }
+
+    return (
+      <div>
+        <div style={{display:'flex',gap:8}}>
+          <input placeholder="List name" value={name} onChange={e=>setName(e.target.value)} />
+          <button onClick={submit}>Create</button>
+        </div>
+        <textarea placeholder="One item per line" rows={3} style={{marginTop:8}} value={itemsText} onChange={e=>setItemsText(e.target.value)}></textarea>
+        <div style={{marginTop:12}}>
+          {(!saved || saved.length===0) && <div className="muted">No saved lists yet.</div>}
+          {(saved || []).map(s => (
+            <div key={s.id} style={{marginTop:10,padding:8,borderRadius:8,border:'1px solid rgba(15,23,42,0.03)'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <div><strong>{s.name}</strong><div className="muted small">{(s.items||[]).length} items</div></div>
+                <div style={{display:'flex',gap:8}}>
+                  <button onClick={()=>pushSavedToToday(s.id)}>Add to Today</button>
+                  <button onClick={()=>{ const nm = window.prompt('Rename', s.name); if(nm !== null) updateSaved(s.id, { name: nm }); }}>Rename</button>
+                  <button onClick={()=>{ if(window.confirm('Delete?')) deleteSaved(s.id); }}>Delete</button>
+                </div>
+              </div>
+              <div style={{marginTop:8}}>{(s.items||[]).slice(0,6).map(it => (<div key={it.id} className="muted small">• {it.text}</div>))}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+
+  <script>
+  (function(){
+    try{
+      const swCode = `
+        const CACHE_NAME = 'focusflow-cache-v1';
+        const ASSETS = ['/'];
+        self.addEventListener('install', event => { self.skipWaiting(); event.waitUntil(caches.open(CACHE_NAME).then(c => c.addAll(ASSETS).catch(() => {}))); });
+        self.addEventListener('activate', event => { event.waitUntil(self.clients.claim()); });
+        self.addEventListener('fetch', event => { if(event.request.method !== 'GET') return; event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request).then(r => { const res = r.clone(); caches.open(CACHE_NAME).then(c => c.put(event.request, res)); return r; }).catch(() => cached))); });
+      `;
+      const swBlob = new Blob([swCode], { type: 'text/javascript' });
+      const swUrl = URL.createObjectURL(swBlob);
+      if('serviceWorker' in navigator){ navigator.serviceWorker.register(swUrl).then(()=>console.log('Service Worker registered')).catch(e=>console.warn('SW err',e)); }
+
+      const manifest = { name: 'FocusFlow', short_name: 'FocusFlow', start_url: '.', display: 'standalone', background_color: '#ffffff', theme_color: '#f3f4f6' };
+      const mfBlob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
+      const mfUrl = URL.createObjectURL(mfBlob);
+      const link = document.createElement('link'); link.rel = 'manifest'; link.href = mfUrl; document.head.appendChild(link);
+    }catch(e){ console.warn('sw/setup err', e); }
+  })();
+  </script>
+</body>
+</html>
